@@ -1,5 +1,9 @@
 import cos
 
+#if DEBUG
+import Logging
+#endif
+
 public struct User {
 	/// creates a new user on the system.
 	/// - no system libraries are used for locking because there are no functions defined for this purpose with the passwd entries.
@@ -17,9 +21,6 @@ public struct User {
 	///		- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
 	///		- `ValueExists` if the user already exists.
 	public static func create(name:String, uid:UInt32, gid:UInt32, shell:String, homeDirectory:String, fullName:String?, shadow:Shadow.Configuration?) throws {
-		// create the shadow entry first.
-		try Shadow.create(name:name, configuration:shadow ?? Shadow.Configuration.defaultConfiguration())
-		
 		// read from the password file.
 		guard let modPwd = fopen("/etc/passwd", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
@@ -74,6 +75,14 @@ public struct User {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
 		}
 
+		// obtain the lock.
+		while lckpwdf() != 0 {
+			usleep(1000)
+		}
+		defer {
+			ulckpwdf()
+		}
+				
 		// iterate through the password file. 
 		// - validate that there aren't going to be any conflicts.
 		// - copy each valid entry to the copy on write file.
@@ -102,6 +111,15 @@ public struct User {
 		guard rename("/etc/passwd.cow", "/etc/passwd") == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
 		}
+
+		// make the shadow entry
+		do {
+			try Shadow.create(name:name, configuration:shadow ?? Shadow.Configuration.defaultConfiguration())
+		} catch let error {
+			// remove the user entry.
+			try? remove(name:name)
+			throw error
+		}
 	}
 
 	/// removes a user from the system.
@@ -112,9 +130,6 @@ public struct User {
 	/// 	- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
 	///		- `NotFound` if the user does not exist.
 	public static func remove(name username:String) throws {
-		// remove the shadow entry first.
-		try Shadow.remove(name:username)
-		
 		// read from the password file.
 		guard let modPwd = fopen("/etc/passwd", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
@@ -139,6 +154,14 @@ public struct User {
 		}
 		guard chmod("/etc/passwd.cow", passwdStats.st_mode) == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
+		}
+		
+		// obtain the lock.
+		while lckpwdf() != 0 {
+			usleep(1000)
+		}
+		defer {
+			ulckpwdf()
 		}
 
 		var didFind = false
@@ -169,6 +192,15 @@ public struct User {
 		guard rename("/etc/passwd.cow", "/etc/passwd") == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
 		}
+
+		// remove the shadow entry.
+		do {
+			try Shadow.remove(name:username)
+		} catch let error {
+			// remove the user entry.
+			try? remove(name:username)
+			throw error
+		}
 	}
 }
 
@@ -198,14 +230,7 @@ extension User {
 		/// - uses system-defined locking functions to ensure maximum safety with other compliant softwares.
 		/// - atomically swaps the shadow file to ensure no corruption.
 		/// - preserves the permissions of the original shadow file.
-		public static func create(name:String, configuration:Configuration) throws {
-			// read from the shadow file.
-			while lckpwdf() != 0 {
-				usleep(1000)
-			}
-			defer {
-				ulckpwdf()
-			}
+		internal static func create(name:String, configuration:Configuration) throws {
 			guard let modShad = fopen("/etc/shadow", "r") else {
 				throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/shadow")
 			}
@@ -276,17 +301,9 @@ extension User {
 		}
 
 		/// removes a user shadow entry from the system.
-		/// - uses system-defined locking functions to ensure maximum safety with other compliant softwares.
 		/// - atomically swaps the shadow file to ensure no corruption.
 		/// - preserves the permissions of the original shadow file.
-		public static func remove(name:String) throws {
-			// read from the shadow file.
-			while lckpwdf() != 0 {
-				usleep(1000)
-			}
-			defer {
-				ulckpwdf()
-			}
+		internal static func remove(name:String) throws {
 			guard let modShad = fopen("/etc/shadow", "r") else {
 				throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/shadow")
 			}

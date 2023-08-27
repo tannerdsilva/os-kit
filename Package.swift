@@ -8,6 +8,9 @@ let package = Package(
 			name: "OS",
 			targets: ["OS"]),
 	],
+	dependencies:[
+		.package(url:"https://github.com/apple/swift-log.git", from:"1.0.0"),
+	],
 	targets: [
 		.target(
 			name: "cos",
@@ -16,7 +19,10 @@ let package = Package(
 			]),
 		.target(
 			name:"OS",
-			dependencies: ["cos"],
+			dependencies: [
+				"cos",
+				.product(name:"Logging", package:"swift-log"),
+			],
 			cSettings: [
 				.define("_GNU_SOURCE")
 			]),
