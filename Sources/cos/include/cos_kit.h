@@ -11,3 +11,5 @@
 
 // returns the result of the errno alias, since errno is a macro that cannot resolve in Swift.
 int getErrno();
+
+int _putgrent(const struct group *grp, FILE *stream);

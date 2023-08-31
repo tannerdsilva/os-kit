@@ -22,9 +22,6 @@ let package = Package(
 			dependencies: [
 				"cos",
 				.product(name:"Logging", package:"swift-log"),
-			],
-			cSettings: [
-				.define("_GNU_SOURCE")
 			]),
 	]
 )

@@ -8,7 +8,12 @@ public struct Group {
 	///		- name: the name of the group to create.
 	///		- gid: the GID to assign to the group.
 	///		- members: the members to assign to the group.
-	public static func create(name:String, gid:gid_t, members:[String]) throws {
+	internal static func _create(name:String, gid:gid_t, members:[String]) throws {
+		// verify access to the file.
+		guard access("/etc/group", R_OK | W_OK) == 0 else {
+			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/group")
+		}
+
 		// read from the password file.
 		guard let modGrp = fopen("/etc/group", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/group")
@@ -63,23 +68,35 @@ public struct Group {
 		// iterate through the group file.
 		// - validate that there aren't going to be any conflicts.
 		// - copy each valid entry to the copy on write file.
+		var foundEntries:UInt = 0
+		var writtenEntries:UInt = 0
 		setgrent()
+		defer {
+			endgrent()
+		}
 		while let nextGroup = getgrent() {
+			foundEntries += 1
 			if String(cString:nextGroup.pointee.gr_name) == name {
 				throw Errors.ValueExists(value:"name:\(name)")
 			} else if nextGroup.pointee.gr_gid == gid {
 				throw Errors.ValueExists(value:"gid:\(name)")
 			} else {
-				guard putgrent(nextGroup, cowFile) == 0 else {
+				guard _putgrent(nextGroup, cowFile) == 0 else {
 					throw Errors.SystemErrnoCode(code:getErrno())
 				}
+				writtenEntries += 1
 			}
 		}
-		endgrent()
 
 		// write the new group entry to the copy on write file.
-		guard putgrent(&newGroup, cowFile) == 0 else {
+		guard _putgrent(&newGroup, cowFile) == 0 else {
 			throw Errors.SystemErrnoCode(code:getErrno())
+		}
+		writtenEntries += 1
+
+		// verify that the expected number of entries were found and written.
+		guard foundEntries > 0 && foundEntries + 1 == writtenEntries else {
+			throw Errors.Internal.placementError
 		}
 		
 		// move the copy on write file to the original.
@@ -119,17 +136,28 @@ public struct Group {
 		// iterate through the group file.
 		// - validate that there aren't going to be any conflicts.
 		// - copy each valid entry to the copy on write file.
+		var foundEntries:UInt = 0
+		var writtenEntries:UInt = 0
 		setgrent()
+		defer {
+			endgrent()
+		}
 		while let nextGroup = getgrent() {
+			foundEntries += 1
 			if String(cString:nextGroup.pointee.gr_name) == name {
 				// skip this entry.
 			} else {
-				guard putgrent(nextGroup, cowFile) == 0 else {
+				guard _putgrent(nextGroup, cowFile) == 0 else {
 					throw Errors.SystemErrnoCode(code:getErrno())
 				}
+				writtenEntries += 1
 			}
 		}
-		endgrent()
+
+		// verify that the expected number of entries were found and written.
+		guard foundEntries > 0 && foundEntries - 1 == writtenEntries else {
+			throw Errors.NotFound(expectedValue:"name:\(name)")
+		}
 
 		// move the copy on write file to the original.
 		guard rename("/etc/group.cow", "/etc/group") == 0 else {

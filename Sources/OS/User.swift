@@ -1,12 +1,9 @@
 import cos
 
-#if DEBUG
-import Logging
-#endif
-
 public struct User {
-	/// creates a new user on the system.
-	/// - no system libraries are used for locking because there are no functions defined for this purpose with the passwd entries.
+
+	/// creates a new user on the system with locked access.
+	/// - NOTE: this function's name does NOT begin with an underscore to signify that it does NOT require external locking (the locking is handled internally).
 	/// - atomically swaps the password file to ensure no corruption.
 	/// - preserves the permissions of the original password file.
 	/// - parameters:
@@ -20,7 +17,28 @@ public struct User {
 	/// - throws:
 	///		- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
 	///		- `ValueExists` if the user already exists.
-	public static func create(name:String, uid:UInt32, gid:UInt32, shell:String, homeDirectory:String, fullName:String?, shadow:Shadow.Configuration?) throws {
+	public static func create(name:String, uid:UInt32, gid:UInt32, shell:String, homeDirectory:String, fullName:String?, shadow:Shadow.Configuration?) async throws {
+		try await withUserEntryLock {
+			try _create(name:name, uid:uid, gid:gid, shell:shell, homeDirectory:homeDirectory, fullName:fullName, shadow:shadow)
+		}
+	}
+
+	/// creates a new user on the system without locking.
+	/// - NOTE: this function's name begins with an underscore to signify that it requires external locking.
+	/// - atomically swaps the password file to ensure no corruption.
+	/// - preserves the permissions of the original password file.
+	/// - parameters:
+	/// 	- name: the name of the user.
+	/// 	- uid: the UID of the user.
+	/// 	- gid: the GID of the user.
+	/// 	- shell: the shell path that the user will use.
+	/// 	- homeDirectory: the home directory of the user.
+	/// 	- fullName: the full name of the user. `nil` specifies no value for this field.
+	/// 	- shadow: the shadow entry for the user. `nil` a default shadow entry, which is an indefinite password disable.
+	/// - throws:
+	///		- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
+	///		- `ValueExists` if the user already exists.
+	public static func _create(name:String, uid:uid_t, gid:gid_t, shell:String, homeDirectory:String, fullName:String?, shadow:Shadow.Configuration?) throws {
 		// read from the password file.
 		guard let modPwd = fopen("/etc/passwd", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
@@ -74,20 +92,18 @@ public struct User {
 		guard chmod("/etc/passwd.cow", passwdStats.st_mode) == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
 		}
-
-		// obtain the lock.
-		while lckpwdf() != 0 {
-			usleep(1000)
-		}
-		defer {
-			ulckpwdf()
-		}
 				
 		// iterate through the password file. 
 		// - validate that there aren't going to be any conflicts.
 		// - copy each valid entry to the copy on write file.
+		var foundEntries:UInt = 0
+		var writtenEntries:UInt = 0
 		setpwent()
+		defer {
+			endpwent()
+		}
 		while let nextUser = getpwent() {
+			foundEntries += 1
 			if String(cString:nextUser.pointee.pw_name) == name {
 				throw Errors.ValueExists(value:"name:\(name)")
 			} else if nextUser.pointee.pw_uid == uid {
@@ -98,12 +114,20 @@ public struct User {
 				guard putpwent(nextUser, cowFile) == 0 else {
 					throw Errors.Internal.placementError
 				}
+				writtenEntries += 1
 			}
 		}
-		endpwent()
 		
 		// place the new entry in the cow file
 		guard putpwent(&newUser, cowFile) == 0 else {
+			throw Errors.Internal.placementError
+		}
+		writtenEntries += 1
+
+		// safety check. verifiy that...
+		// - we started with nonzero entries.
+		// - a new entry was added to the set of existing entries.
+		guard foundEntries > 0 && foundEntries + 1 == writtenEntries else {
 			throw Errors.Internal.placementError
 		}
 
@@ -114,22 +138,35 @@ public struct User {
 
 		// make the shadow entry
 		do {
-			try Shadow.create(name:name, configuration:shadow ?? Shadow.Configuration.defaultConfiguration())
+			try Shadow._create(name:name, configuration:shadow ?? Shadow.Configuration.defaultConfiguration())
 		} catch let error {
 			// remove the user entry.
-			try? remove(name:name)
+			try? _remove(name:name)
 			throw error
 		}
 	}
 
-	/// removes a user from the system.
-	/// - no system libraries are used for locking because there are no functions defined for this purpose with the passwd entries.
+	/// removes a user from the system with locked access.
+	/// - NOTE: this function does NOT begin with an underscore to signify that it does NOT require external locking (the locking is handled internally).
 	/// - atomically swaps the password file to ensure no corruption.
 	/// - preserves the permissions of the original password file.
 	/// - throws:
 	/// 	- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
 	///		- `NotFound` if the user does not exist.
-	public static func remove(name username:String) throws {
+	public static func remove(name username:String) async throws {
+		try await withUserEntryLock {
+			try _remove(name:username)
+		}
+	}
+
+	/// removes a user from the system without a lock.
+	/// - NOTE: this function's name begins with an underscore to signify that it requires external locking.
+	/// - atomically swaps the password file to ensure no corruption.
+	/// - preserves the permissions of the original password file.
+	/// - throws:
+	/// 	- `InsufficientPermissions` if the calling process does not have sufficient permissions to modify the password file.
+	///		- `NotFound` if the user does not exist.
+	public static func _remove(name username:String) throws {
 		// read from the password file.
 		guard let modPwd = fopen("/etc/passwd", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
@@ -155,22 +192,20 @@ public struct User {
 		guard chmod("/etc/passwd.cow", passwdStats.st_mode) == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/passwd")
 		}
-		
-		// obtain the lock.
-		while lckpwdf() != 0 {
-			usleep(1000)
-		}
-		defer {
-			ulckpwdf()
-		}
 
 		var didFind = false
 
 		// iterate through the password file.
 		// - validate that the name acutally exists.
 		// - copy each valid (nonmatching) entry to the copy on write file.
+		var foundEntries:UInt = 0
+		var writtenEntries:UInt = 0
 		setpwent()
+		defer {
+			endpwent()
+		}
 		while let nextUser = getpwent() {
+			foundEntries += 1
 			if String(cString:nextUser.pointee.pw_name) == username {
 				// skip this entry.
 				didFind = true
@@ -179,13 +214,18 @@ public struct User {
 				guard putpwent(nextUser, cowFile) == 0 else {
 					throw Errors.Internal.placementError
 				}
+				writtenEntries += 1
 			}
 		}
-		endpwent()
 
 		// ensure that the user actually exists.
 		guard didFind else {
 			throw Errors.NotFound(expectedValue:username)
+		}
+
+		// safety check.
+		guard foundEntries > 0 && foundEntries - 1 == writtenEntries else {
+			throw Errors.Internal.placementError
 		}
 
 		// swap the cow file with the original.
@@ -195,10 +235,10 @@ public struct User {
 
 		// remove the shadow entry.
 		do {
-			try Shadow.remove(name:username)
+			try Shadow._remove(name:username)
 		} catch let error {
 			// remove the user entry.
-			try? remove(name:username)
+			try? _remove(name:username)
 			throw error
 		}
 	}
@@ -207,6 +247,7 @@ public struct User {
 extension User {
 	/// functions and properties related the shadow database for system users.
 	public struct Shadow {
+
 		/// the metadata (excluding name) that is associated with a user shadow entry.
 		public struct Configuration {
 			/// the password hash for the user.
@@ -226,11 +267,20 @@ extension User {
 			}
 		}
 
-		/// creates a user shadow entry on the system.
+		/// creates a user shadow entry on the system with locked access.
+		/// - NOTE: this function does NOT begin with an underscore to signify that it does NOT require external locking (the locking is handled internally).
+		public static func create(name:String, configuration:Configuration) async throws {
+			try await withUserEntryLock {
+				try _create(name:name, configuration:configuration)
+			}
+		}
+
+		/// creates a user shadow entry on the system without locked access.
+		/// - NOTE: this function's name begins with an underscore to signify that it requires external locking.
 		/// - uses system-defined locking functions to ensure maximum safety with other compliant softwares.
 		/// - atomically swaps the shadow file to ensure no corruption.
 		/// - preserves the permissions of the original shadow file.
-		internal static func create(name:String, configuration:Configuration) throws {
+		public static func _create(name:String, configuration:Configuration) throws {
 			guard let modShad = fopen("/etc/shadow", "r") else {
 				throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/shadow")
 			}
@@ -277,20 +327,34 @@ extension User {
 			// iterate through the shadow file.
 			// - validate that there aren't going to be any conflicts.
 			// - copy each valid entry to the copy on write file.
+			var foundEntries:UInt = 0
+			var writtenEntries:UInt = 0
 			setspent()
+			defer {
+				endspent()
+			}
 			while let nextUser = getspent() {
+				foundEntries += 1
 				if String(cString:nextUser.pointee.sp_namp) == name {
 					throw Errors.ValueExists(value:"name:\(name)")
 				} else {
 					guard putspent(nextUser, cowFile) == 0 else {
 						throw Errors.Internal.placementError
 					}
+					writtenEntries += 1
 				}
 			}
-			endspent()
 
 			// place the new entry in the cow file
 			guard putspent(&newUser, cowFile) == 0 else {
+				throw Errors.Internal.placementError
+			}
+			writtenEntries += 1
+
+			// safety check. verifiy that...
+			// - we started with nonzero entries.
+			// - a new entry was added to the set of existing entries.
+			guard foundEntries > 0 && foundEntries + 1 == writtenEntries else {
 				throw Errors.Internal.placementError
 			}
 
@@ -300,10 +364,26 @@ extension User {
 			}
 		}
 
-		/// removes a user shadow entry from the system.
+		/// removes a user shadow entry from the system with locked access.
+		///	- NOTE: this function does NOT begin with an underscore to signify that it does NOT require external locking (the locking is handled internally). 
 		/// - atomically swaps the shadow file to ensure no corruption.
 		/// - preserves the permissions of the original shadow file.
-		internal static func remove(name:String) throws {
+		public static func remove(name:String) async throws {
+			try await withUserEntryLock {
+				try _remove(name:name)
+			}
+		}
+
+		/// removes a user shadow entry from the system without locked access.
+		/// - NOTE: this function's name begins with an underscore to signify that it requires external locking.
+		/// - atomically swaps the shadow file to ensure no corruption.
+		/// - preserves the permissions of the original shadow file.
+		public static func _remove(name:String) throws {
+			// verify access to the shadow file.
+			guard access("/etc/shadow", R_OK | W_OK) == 0 else {
+				throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/shadow")
+			}
+
 			guard let modShad = fopen("/etc/shadow", "r") else {
 				throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/shadow")
 			}
@@ -334,8 +414,14 @@ extension User {
 			// iterate through the shadow file.
 			// - validate that the name acutally exists.
 			// - copy each valid (nonmatching) entry to the copy on write file.
+			var foundEntries:UInt = 0
+			var writtenEntries:UInt = 0
 			setspent()
+			defer {
+				endspent()
+			}
 			while let nextUser = getspent() {
+				foundEntries += 1
 				if String(cString:nextUser.pointee.sp_namp) == name {
 					// skip this entry.
 					didFind = true
@@ -344,13 +430,20 @@ extension User {
 					guard putspent(nextUser, cowFile) == 0 else {
 						throw Errors.Internal.placementError
 					}
+					writtenEntries += 1
 				}
 			}
-			endspent()
 
 			// ensure that the user actually exists.
 			guard didFind else {
 				throw Errors.NotFound(expectedValue:name)
+			}
+
+			// safety check. verify that...
+			// - we started with nonzero entries.
+			// - a entry was removed from the set of existing entries.
+			guard foundEntries > 0 && foundEntries - 1 == writtenEntries else {
+				throw Errors.Internal.placementError
 			}
 
 			// swap the cow file with the original.
