@@ -2,13 +2,25 @@ import cos
 
 /// OS provides an interface to the operating system.
 public struct Group {
-
-	/// create a new group on the system.
+	/// create a new group on the system with resource locking.
+	/// - NOTE: this function's name is NOT prefixed with an underscore to signify that it performs resource locking.
 	/// - parameters:
 	///		- name: the name of the group to create.
 	///		- gid: the GID to assign to the group.
 	///		- members: the members to assign to the group.
-	internal static func _create(name:String, gid:gid_t, members:[String]) throws {
+	public static func create(name:String, gid:gid_t, members:[String]) async throws {
+		try await withUserEntryLock {
+			try _create(name:name, gid:gid, members:members)
+		}
+	}
+
+	/// create a new group on the system without resource locking.
+	/// - NOTE: this function's name is prefixed with an underscore to signify that it does not perform any locking.
+	/// - parameters:
+	///		- name: the name of the group to create.
+	///		- gid: the GID to assign to the group.
+	///		- members: the members to assign to the group.
+	public static func _create(name:String, gid:gid_t, members:[String]) throws {
 		// verify access to the file.
 		guard access("/etc/group", R_OK | W_OK) == 0 else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/group")
@@ -105,8 +117,21 @@ public struct Group {
 		}
 	}
 
-	/// remove a group from the system.
-	public static func remove(name:String) throws {
+	/// remove a group from the system with resource locking.
+	/// - NOTE: this function's name is NOT prefixed with an underscore to signify that it performs resource locking.
+	/// - parameters:
+	/// 	- name: the name of the group to remove.
+	public static func remove(name:String) async throws {
+		try await withUserEntryLock {
+			try _remove(name:name)
+		}
+	}
+
+	/// remove a group from the system without resource locking.
+	/// - NOTE: this function's name is prefixed with an underscore to signify that it does not perform any locking.
+	/// - parameters:
+	/// 	- name: the name of the group to remove.
+	public static func _remove(name:String) throws {
 		// read from the password file.
 		guard let modGrp = fopen("/etc/group", "r") else {
 			throw Errors.InsufficientPermissions(whoami:CurrentProcess.effectiveUsername(), accessPath:"/etc/group")
